@@ -491,6 +491,13 @@ local function build_packet()
                     spawn_type = m.spawn_type,
                     is_npc     = m.is_npc and true or false,
                     valid      = m.valid_target and true or false,
+                    -- AI EDIT [atlas-charmed]: charmed=true is the
+                    -- only field that's set consistently across all
+                    -- observers (owner + outside) for a trust/pet/
+                    -- alter ego. spawn_type and in_party shift based
+                    -- on whether the viewer is the owner. Renderer
+                    -- uses this as the primary trust indicator.
+                    charmed    = m.charmed and true or false,
                 }
                 count = count + 1
             end
@@ -593,6 +600,23 @@ windower.register_event('addon command', function(cmd, ...)
             log(('//atlas %s is only available in Sortie zones'):format(cmd))
         else
             smart_ping_bitzer(args[1])
+        end
+    elseif cmd == 'dumpmob' then
+        -- AI EDIT [atlas-dumpmob]: temporary debug. Target a trust /
+        -- pet / NPC, then //at dumpmob to print every non-table field
+        -- of that mob entry. Used to find a distinguishing field that
+        -- can route trusts away from the 'npc' classification in the
+        -- renderer. Remove once we've identified the right field.
+        local t = windower.ffxi.get_mob_by_target('t')
+        if not t then
+            log('dumpmob: no target')
+        else
+            log(('=== %s (idx=%d) ==='):format(t.name or '?', t.index or 0))
+            for k, v in pairs(t) do
+                if type(v) ~= 'table' then
+                    log(('  %-20s = %s'):format(tostring(k), tostring(v)))
+                end
+            end
         end
     elseif cmd == 'test' then
         -- AI EDIT [atlas-test]: dev/test helper, same pattern as
