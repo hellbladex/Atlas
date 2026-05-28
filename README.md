@@ -1,2 +1,2 @@
 Stick atlas.lua into a folder named atlas inside your addons folder and put the Atlas-0.1.0-portable.exe into its own folder or the same atlas addon folder and run. 
-you will need to create a maps folder in the same directory as the Atlas-0.1.0-portable.exe!!! It should accept png or gif and you can use apradar maps or mappy so long as they include the maps.ini with them.
+you will need to create a maps folder in the same directory as the Atlas-0.1.0-portable.exe!!! It should accept png or gif and you can use apradar maps or mappy so long as they include the maps.ini with them. maps nq and some hq included are here https://drive.google.com/file/d/186YsnbyMpywVGLjQuVFgRlT4qyivIEbN/view?usp=sharing
