@@ -616,6 +616,40 @@ windower.register_event('addon command', function(cmd, ...)
         else
             smart_ping_bitzer(args[1])
         end
+    elseif cmd == 'dumpzone' then
+        -- AI EDIT [atlas-dumpzone]: temporary debug. Dumps everything
+        -- Windower exposes about the current zone/sub-area, so we can
+        -- see whether there's a sub-map / floor index we can ship to
+        -- the renderer (Atlas currently picks sub-maps by position
+        -- bounds, which falls back to the wrong sub-map in Sortie /
+        -- Outer Ra'Kaznar). Walk between sub-areas (press 'M' to
+        -- confirm you switched), run //at dumpzone at each, and
+        -- compare which fields change.
+        local info = windower.ffxi.get_info()
+        log('=== get_info() ===')
+        if info then
+            for k, v in pairs(info) do
+                if type(v) ~= 'table' then
+                    log(('  %-18s = %s'):format(tostring(k), tostring(v)))
+                end
+            end
+        else
+            log('  (nil)')
+        end
+        local p = windower.ffxi.get_player()
+        if p then
+            log('=== get_player() map-ish fields ===')
+            for k, v in pairs(p) do
+                if type(v) ~= 'table' and (
+                    tostring(k):lower():find('map') or
+                    tostring(k):lower():find('zone') or
+                    tostring(k):lower():find('floor') or
+                    tostring(k):lower():find('area')
+                ) then
+                    log(('  %-18s = %s'):format(tostring(k), tostring(v)))
+                end
+            end
+        end
     elseif cmd == 'claim' then
         -- AI EDIT [atlas-claim-debug]: target a normal mob you're
         -- fighting, then //at claim. Prints player.id vs target.
