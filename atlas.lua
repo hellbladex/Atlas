@@ -404,10 +404,25 @@ local function build_packet()
     -- map even when the zone id itself has a real map.ini entry.
     -- (Some mog house variants live in regular zones flagged via this
     -- boolean rather than via a unique zone id.)
+    -- AI EDIT [atlas-party-ids]: ship party member IDs so the renderer
+    -- can distinguish "claimed by my party" from "claimed by random
+    -- other player" with different marker colors. Computed each tick
+    -- because party membership can change at any time (invites, KOs,
+    -- members leaving zones, etc.).
+    local party = windower.ffxi.get_party() or {}
+    local party_ids = {}
+    for _, slot in ipairs({'p0','p1','p2','p3','p4','p5'}) do
+        local pm = party[slot]
+        if pm and pm.mob and pm.mob.id then
+            party_ids[#party_ids + 1] = pm.mob.id
+        end
+    end
+
     local pkt = {
         v = 1,
         char_name = player.name,
         char_id   = player.id,
+        party_ids = party_ids,
         zone_id   = info.zone,
         mog_house = info.mog_house and true or false,
         ts        = os.clock(),
@@ -601,6 +616,24 @@ windower.register_event('addon command', function(cmd, ...)
         else
             smart_ping_bitzer(args[1])
         end
+    elseif cmd == 'claim' then
+        -- AI EDIT [atlas-claim-debug]: target a normal mob you're
+        -- fighting, then //at claim. Prints player.id vs target.
+        -- claim_id so we can confirm whether the "claimed by me"
+        -- check fires (and, if not, what the actual claim_id looks
+        -- like so we can fix the comparison).
+        local player = windower.ffxi.get_mob_by_target('me')
+        local t = windower.ffxi.get_mob_by_target('t')
+        if not player then log('claim: no player') return end
+        if not t then log('claim: no target') return end
+        local cid = t.claim_id or 0
+        log(('player.id      = %d (0x%X)'):format(player.id, player.id))
+        log(('player.index   = %d (0x%X)'):format(player.index, player.index))
+        log(('target.name    = %s'):format(t.name or '?'))
+        log(('target.claim_id= %d (0x%X)'):format(cid, cid))
+        log(('eq full id     = %s'):format(tostring(cid == player.id)))
+        log(('eq low 16 bits = %s'):format(tostring(bit.band(cid, 0xFFFF) == bit.band(player.id, 0xFFFF))))
+        log(('eq index       = %s'):format(tostring(cid == player.index)))
     elseif cmd == 'dumpmob' then
         -- AI EDIT [atlas-dumpmob]: temporary debug. Target a trust /
         -- pet / NPC, then //at dumpmob to print every non-table field
