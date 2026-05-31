@@ -24,7 +24,7 @@ config = require('config')
 socket = require('socket')
 packets = require('packets')
 
--- AI EDIT [atlas-scan]: scan-result buffers. Each tick of build_packet
+-- [atlas-scan]: scan-result buffers. Each tick of build_packet
 -- drains these into the outgoing packet as `widescan_events` /
 -- `bitzer_events` so the radar app holds the state, not the addon.
 -- Cleared every send -- pure transit buffers.
@@ -33,12 +33,12 @@ local bitzer_pending = {}
 local clear_widescan_flag = false
 local clear_bitzer_flag = false
 
--- AI EDIT [atlas-scan]: Sortie zones -- all three are Outer Ra'Kaznar
+-- [atlas-scan]: Sortie zones -- all three are Outer Ra'Kaznar
 -- basement variants (U1/U2/U3). Mirrors bitzer.lua's safety lock for
 -- `//atlas bit`.
 local SORTIE_ZONES = { [133] = true, [189] = true, [275] = true }
 
--- AI EDIT [atlas-scan]: the four Bitzer objects in Sortie. NMs are not
+-- [atlas-scan]: the four Bitzer objects in Sortie. NMs are not
 -- included here -- they show up as regular live mobs once within
 -- draw distance, no special tracking needed.
 local BITZER_NAMES = {
@@ -48,7 +48,7 @@ local BITZER_NAMES = {
     [840] = 'Bitzer (H)',
 }
 
--- AI EDIT [atlas-bit-flag]: Sortie quadrant entry-point detection.
+-- [atlas-bit-flag]: Sortie quadrant entry-point detection.
 -- When the player teleports into a quadrant they land within 25y of
 -- one of these entry coords. Hitting the trigger area sets the flag;
 -- flag persists until either the player gets within 15y of the
@@ -71,7 +71,7 @@ local current_quadrant_bitzer = nil
 local last_bitzer_pos = {}  -- [index] = { x = ..., y = ... }
 
 local function update_quadrant_flag()
-    -- AI EDIT [atlas-bit-flag]: only scan the trigger areas when the
+    -- [atlas-bit-flag]: only scan the trigger areas when the
     -- player is actually in a Sortie zone. Cheap early-out everywhere
     -- else and avoids any chance of a stray same-coord match in an
     -- unrelated zone.
@@ -157,7 +157,7 @@ local settings = config.load(defaults)
 local udp = nil
 local pkts_sent = 0
 local last_status_log = 0
--- AI EDIT [apradar-ffxideck-lessons]: ffxideckcrash.lua taught us that
+-- [apradar-ffxideck-lessons]: ffxideckcrash.lua taught us that
 -- aggressive socket lifecycle ops inside FFXI's process crash the game.
 -- We open ONE udp socket on load, never close/reopen per tick. Polling
 -- runs via coroutine.schedule (not prerender) so the scheduler isn't
@@ -185,7 +185,7 @@ local function open_socket()
     return true
 end
 
--- AI EDIT [atlas-scan]: hook the same incoming packets bitzer.lua hooks.
+-- [atlas-scan]: hook the same incoming packets bitzer.lua hooks.
 -- 0x0F4 -> widescan result (one packet per mob), 0x00D/0x00E -> mob
 -- update (used to track Bitzer object positions in Sortie). All work
 -- is pcall-wrapped so a parse failure can't unwind into Windower's
@@ -196,7 +196,7 @@ windower.register_event('incoming chunk', function(id, data)
             local me = windower.ffxi.get_mob_by_target('me')
             if not me then return end
 
-            -- AI EDIT [atlas-widescan-fields]: parse via Windower's
+            -- [atlas-widescan-fields]: parse via Windower's
             -- schema (libs/packets/fields.lua) so we get Name + Type
             -- straight from the packet. The previous raw-byte path
             -- only had Index + x/y and relied on get_mob_by_index for
@@ -291,7 +291,7 @@ windower.register_event('incoming chunk', function(id, data)
     end
 end)
 
--- AI EDIT [atlas-bit-flag]: //atlas bit trigger. Uses the quadrant
+-- [atlas-bit-flag]: //atlas bit trigger. Uses the quadrant
 -- flag set by update_quadrant_flag() when the player walked into a
 -- quadrant entry area. Letter override bypasses the flag entirely.
 local function smart_ping_bitzer(letter)
@@ -310,7 +310,7 @@ local function smart_ping_bitzer(letter)
     end
 end
 
--- AI EDIT [atlas-scan]: widescan trigger. Outgoing 0x0F4 Flags=1 is
+-- [atlas-scan]: widescan trigger. Outgoing 0x0F4 Flags=1 is
 -- the standard widescan request -- same packet bitzer.lua's `ping`
 -- command sends.
 local function trigger_widescan()
@@ -320,7 +320,7 @@ local function trigger_widescan()
     if not ok then log('widescan trigger failed') end
 end
 
--- AI EDIT [atlas-widescan-cooldown]: client-side rate limit on //at ws.
+-- [atlas-widescan-cooldown]: client-side rate limit on //at ws.
 -- 5s between requests, since spamming the command faster than the
 -- server's own cooldown wastes a packet and clutters the log. Tracked
 -- in wall-clock seconds via os.time().
@@ -353,7 +353,7 @@ local function json_encode(v)
         if v == math.floor(v) and math.abs(v) < 1e15 then
             return tostring(math.floor(v))
         end
-        -- AI EDIT [atlas-precision]: 2-decimal cap on floats. 0.01y
+        -- [atlas-precision]: 2-decimal cap on floats. 0.01y
         -- horizontal precision is well past anything visible on the
         -- radar, and 0.01 rad heading precision is ~0.5 degrees --
         -- plenty for the arrow direction.
@@ -381,6 +381,233 @@ local function json_encode(v)
 end
 
 --[[ -----------------------------------------------------------------
+     NM discovery log.
+
+     Two lists collected from in-game commands. They are mutually
+     exclusive at the (zone, name, index) level -- flagging the same
+     (name, index) as NM after marking it not-NM removes it from the
+     not-NM list, and vice versa.
+
+       discovered_nms.json -- mobs the user has flagged as NMs
+                              (//at nm with target)
+       non_nms.json        -- mobs incorrectly flagged as NMs
+                              (//at notnm with target)
+
+     Both files live under the addon's data/ dir, never inside the
+     Electron app's bundled assets. Users send these files to the
+     maintainer, who reviews and merges into the official nm.json.
+
+     Schema (NOT a drop-in for nm.json -- discovery log is richer):
+       { "<zone_id>": { "<name>": [mob_index, mob_index, ...] } }
+
+     The per-name index list disambiguates same-name mobs where one
+     spawn is the NM and others are regular mobs (classic case:
+     "Mountain Worm" has both an NM and normal spawns under the same
+     name). Indices are the per-zone mob index (id & 0xFFFF), which
+     stays stable across instances of the zone.
+----------------------------------------------------------------- ]]
+local DISCOVERED_NMS_PATH = windower.addon_path .. 'data/discovered_nms.json'
+local NON_NMS_PATH        = windower.addon_path .. 'data/non_nms.json'
+
+-- in-memory: zone_id (number) -> name (string) -> { index (number) = true }
+local discovered_nms = {}
+local non_nms        = {}
+
+-- Parse our own JSON output. Format is rigid:
+--   { "ZONE": { "NAME": [idx, idx], "NAME": [idx] }, "ZONE": {...} }
+-- so a small regex extractor handles it without a full JSON parser.
+local function parse_nm_file(path)
+    local f = io.open(path, 'r')
+    if not f then return {} end
+    local content = f:read('*a')
+    f:close()
+    local out = {}
+    -- Match zone objects: "ZONE": { ... }. %b{} balances nested braces.
+    for zone_id, zone_block in content:gmatch('"(%d+)"%s*:%s*(%b{})') do
+        local zone = {}
+        for name, idx_list in zone_block:gmatch('"([^"]*)"%s*:%s*%[([^%]]*)%]') do
+            name = name:gsub('\\"', '"'):gsub('\\\\', '\\')
+            local set = {}
+            for idx in idx_list:gmatch('(%-?%d+)') do
+                set[tonumber(idx)] = true
+            end
+            zone[name] = set
+        end
+        out[tonumber(zone_id)] = zone
+    end
+    return out
+end
+
+local function save_nm_file(path, data)
+    -- Serialize alphabetized by zone, then name, then numeric idx --
+    -- gives stable diffs across runs.
+    local zone_ids = {}
+    for zid in pairs(data) do zone_ids[#zone_ids + 1] = zid end
+    table.sort(zone_ids)
+
+    local zone_parts = {}
+    for _, zid in ipairs(zone_ids) do
+        local names = {}
+        for n in pairs(data[zid]) do names[#names + 1] = n end
+        table.sort(names)
+
+        local name_parts = {}
+        for _, n in ipairs(names) do
+            local idx_set = data[zid][n]
+            local idxs = {}
+            for idx in pairs(idx_set) do idxs[#idxs + 1] = idx end
+            table.sort(idxs)
+            local idx_strs = {}
+            for i, v in ipairs(idxs) do idx_strs[i] = tostring(v) end
+            name_parts[#name_parts + 1] = ('    "%s": [%s]'):format(
+                json_escape_str(n), table.concat(idx_strs, ', '))
+        end
+        zone_parts[#zone_parts + 1] = ('  "%d": {\n%s\n  }'):format(
+            zid, table.concat(name_parts, ',\n'))
+    end
+
+    local body = '{\n' .. table.concat(zone_parts, ',\n') .. '\n}\n'
+
+    local f, err = io.open(path, 'w')
+    if not f then
+        log('failed to write ' .. path .. ': ' .. tostring(err))
+        return false
+    end
+    f:write(body)
+    f:close()
+    return true
+end
+
+local function load_nm_lists()
+    discovered_nms = parse_nm_file(DISCOVERED_NMS_PATH)
+    non_nms        = parse_nm_file(NON_NMS_PATH)
+end
+
+-- Remove (zone, name, index) from a store. Cleans up empty sub-tables
+-- so the serialized file doesn't accumulate empty entries.
+local function remove_entry(store, zone_id, name, idx)
+    local zone = store[zone_id]
+    if not zone then return false end
+    local idx_set = zone[name]
+    if not idx_set or not idx_set[idx] then return false end
+    idx_set[idx] = nil
+    if next(idx_set) == nil then zone[name] = nil end
+    if next(zone) == nil then store[zone_id] = nil end
+    return true
+end
+
+-- Add the current target to either discovered_nms or non_nms. If the
+-- same (zone, name, index) already lives in the *other* list, remove
+-- it from there so the two lists never disagree.
+--   kind = 'nm' or 'notnm'
+local function flag_target_nm(kind)
+    local target = windower.ffxi.get_mob_by_target('t')
+    if not target then
+        log('no target -- target an entity first, then //at ' .. kind)
+        return
+    end
+    -- Reject obvious junk: player chars, trusts, pets, NPCs aren't NMs.
+    -- spawn_type 16 = Mob (per FFXI's bitfield: 1=PC, 2=NPC, 16=Mob).
+    -- For //at notnm we still allow non-mobs through, since the user
+    -- might want to flag a non-mob that's incorrectly listed as an NM.
+    if kind == 'nm' and target.spawn_type ~= 16 then
+        log(('target "%s" is not a regular mob (spawn_type=%d). Skipping.'):format(
+            target.name or '?', target.spawn_type or -1))
+        return
+    end
+
+    local info = windower.ffxi.get_info()
+    if not info then log('no zone info available') return end
+    local zone_id = info.zone
+    local name    = target.name
+    if not name or name == '' then log('target has no name') return end
+    local id      = target.id or 0
+    local idx     = id % 0x10000   -- per-zone mob index (low 16 bits)
+    if idx == 0 then log('target has no id') return end
+
+    local store      = (kind == 'nm') and discovered_nms or non_nms
+    local store_path = (kind == 'nm') and DISCOVERED_NMS_PATH or NON_NMS_PATH
+    local other      = (kind == 'nm') and non_nms or discovered_nms
+    local other_path = (kind == 'nm') and NON_NMS_PATH or DISCOVERED_NMS_PATH
+
+    store[zone_id] = store[zone_id] or {}
+    store[zone_id][name] = store[zone_id][name] or {}
+    if store[zone_id][name][idx] then
+        log(('"%s" (zone %d, idx %d) already in %s list'):format(name, zone_id, idx, kind))
+        return
+    end
+    store[zone_id][name][idx] = true
+
+    local moved = remove_entry(other, zone_id, name, idx)
+
+    if save_nm_file(store_path, store) then
+        if moved then
+            save_nm_file(other_path, other)
+            log(('moved "%s" idx %d (zone %d) -> %s (was in other list)'):format(
+                name, idx, zone_id, kind))
+        else
+            log(('added "%s" idx %d (zone %d) to %s list'):format(
+                name, idx, zone_id, kind))
+        end
+    end
+end
+
+-- Remove the current target from BOTH lists. Useful when an entry
+-- was added by mistake and should not appear in either list.
+local function remove_target_nm()
+    local target = windower.ffxi.get_mob_by_target('t')
+    if not target then
+        log('no target -- target an entity first, then //at r')
+        return
+    end
+    local info = windower.ffxi.get_info()
+    if not info then log('no zone info available') return end
+    local zone_id = info.zone
+    local name    = target.name
+    if not name or name == '' then log('target has no name') return end
+    local idx = (target.id or 0) % 0x10000
+    if idx == 0 then log('target has no id') return end
+
+    local removed_nm     = remove_entry(discovered_nms, zone_id, name, idx)
+    local removed_not_nm = remove_entry(non_nms,        zone_id, name, idx)
+
+    if removed_nm     then save_nm_file(DISCOVERED_NMS_PATH, discovered_nms) end
+    if removed_not_nm then save_nm_file(NON_NMS_PATH,        non_nms)        end
+
+    if removed_nm and removed_not_nm then
+        log(('removed "%s" idx %d (zone %d) from both lists'):format(name, idx, zone_id))
+    elseif removed_nm then
+        log(('removed "%s" idx %d (zone %d) from discovered_nms'):format(name, idx, zone_id))
+    elseif removed_not_nm then
+        log(('removed "%s" idx %d (zone %d) from non_nms'):format(name, idx, zone_id))
+    else
+        log(('"%s" idx %d (zone %d) was not in either list'):format(name, idx, zone_id))
+    end
+end
+
+local function print_nm_lists()
+    local function summarize(label, data)
+        local zone_count = 0
+        local name_count = 0
+        local idx_count  = 0
+        for _, zone in pairs(data) do
+            zone_count = zone_count + 1
+            for _, idx_set in pairs(zone) do
+                name_count = name_count + 1
+                for _ in pairs(idx_set) do idx_count = idx_count + 1 end
+            end
+        end
+        log(('  %s: %d names / %d entries across %d zones'):format(
+            label, name_count, idx_count, zone_count))
+    end
+    log('--- atlas NM discovery log ---')
+    summarize('discovered (mark as NM) ', discovered_nms)
+    summarize('non-NMs    (unmark)     ', non_nms)
+    log('files: ' .. DISCOVERED_NMS_PATH)
+    log('       ' .. NON_NMS_PATH)
+end
+
+--[[ -----------------------------------------------------------------
      Snapshot the world into the packet table.
 ----------------------------------------------------------------- ]]
 local function build_packet()
@@ -393,18 +620,18 @@ local function build_packet()
     local self_mob = windower.ffxi.get_mob_by_target('me')
     if not self_mob then return nil end
 
-    -- AI EDIT [apradar-target]: include the player's currently targeted
+    -- [apradar-target]: include the player's currently targeted
     -- entity id so the renderer can render it always-visible regardless
     -- of filter settings, and color it distinctly.
     local target_mob = windower.ffxi.get_mob_by_target('t')
     local target_id = target_mob and target_mob.id or 0
 
-    -- AI EDIT [apradar-mh-flag]: forward the FFXI client's mog_house
+    -- [apradar-mh-flag]: forward the FFXI client's mog_house
     -- flag so the renderer can swap to its blank-interior fallback
     -- map even when the zone id itself has a real map.ini entry.
     -- (Some mog house variants live in regular zones flagged via this
     -- boolean rather than via a unique zone id.)
-    -- AI EDIT [atlas-party-ids]: ship party member IDs so the renderer
+    -- [atlas-party-ids]: ship party member IDs so the renderer
     -- can distinguish "claimed by my party" from "claimed by random
     -- other player" with different marker colors. Computed each tick
     -- because party membership can change at any time (invites, KOs,
@@ -443,7 +670,7 @@ local function build_packet()
     local max_d_sq = settings.max_distance * settings.max_distance
     local cull = settings.max_distance > 0
 
-    -- AI EDIT [apradar-mob-cap]: hard caps + position sanity filter.
+    -- [apradar-mob-cap]: hard caps + position sanity filter.
     -- Two issues drove this:
     --   1. FFXI's mob array keeps stale slots from previous zones with
     --      x=y=z=0 -- they pass the 50y distance check against any
@@ -456,7 +683,7 @@ local function build_packet()
     -- cap the result list at MOB_CAP regardless. 200 entries is
     -- comfortably under the UDP limit (~30KB) and far more than the
     -- ~50 entities ever visible within FFXI's draw distance.
-    -- AI EDIT [atlas-scan]: drain scan buffers into the outgoing packet.
+    -- [atlas-scan]: drain scan buffers into the outgoing packet.
     -- The radar app owns the persistent scan state; the addon only
     -- forwards events (deltas) and clear-flags. Empty arrays / absent
     -- flags are the steady state when no scan is happening.
@@ -481,7 +708,7 @@ local function build_packet()
     local count = 0
     for _, m in pairs(windower.ffxi.get_mob_array()) do
         if count >= MOB_CAP then break end
-        -- AI EDIT [apradar-send-all-renderer-filters]: phantom filter
+        -- [apradar-send-all-renderer-filters]: phantom filter
         -- moved client-side so a "Show Hidden" toggle in the renderer
         -- can reveal them on demand. Addon still drops truly bogus
         -- entries at (0,0,0) -- those are uninitialized array slots,
@@ -506,7 +733,7 @@ local function build_packet()
                     spawn_type = m.spawn_type,
                     is_npc     = m.is_npc and true or false,
                     valid      = m.valid_target and true or false,
-                    -- AI EDIT [atlas-charmed]: charmed=true is the
+                    -- [atlas-charmed]: charmed=true is the
                     -- only field that's set consistently across all
                     -- observers (owner + outside) for a trust/pet/
                     -- alter ego. spawn_type and in_party shift based
@@ -547,7 +774,7 @@ end
 
 local function tick_loop()
     if not running then return end
-    -- AI EDIT [atlas-bit-flag]: refresh the quadrant flag every tick
+    -- [atlas-bit-flag]: refresh the quadrant flag every tick
     -- so entry-area triggers and reach-clears fire at the addon's
     -- normal cadence without needing a separate scheduler.
     update_quadrant_flag()
@@ -563,6 +790,7 @@ windower.register_event('load', function()
     open_socket()
     running = true
     coroutine.schedule(tick_loop, 1 / math.max(1, settings.rate_hz))
+    load_nm_lists()
     log(('exporter loaded -- target=%s:%d rate=%dHz cull=%dy'):format(
         settings.host, settings.port, settings.rate_hz, settings.max_distance))
 end)
@@ -576,7 +804,7 @@ windower.register_event('unload', function()
     socket_ok = false
 end)
 
--- AI EDIT [atlas-bit-flag]: zone changes invalidate the quadrant
+-- [atlas-bit-flag]: zone changes invalidate the quadrant
 -- state -- the bitzer positions captured on the old basement are
 -- meaningless in the new zone. Stays in lock-step with the radar's
 -- own zone-change clear in main.js.
@@ -595,21 +823,21 @@ windower.register_event('addon command', function(cmd, ...)
             settings.max_distance, tostring(settings.enabled), pkts_sent,
             #widescan_pending, #bitzer_pending))
     elseif cmd == 'ws' or cmd == 'widescan' then
-        -- AI EDIT [atlas-widescan-cooldown]: refuse if within the 5s
+        -- [atlas-widescan-cooldown]: refuse if within the 5s
         -- window since the last request.
         local now = os.time()
         local elapsed = now - last_widescan_at
         if elapsed < WIDESCAN_COOLDOWN_S then
             log(('widescan on cooldown (%ds left)'):format(WIDESCAN_COOLDOWN_S - elapsed))
         else
-            -- AI EDIT [atlas-scan]: trigger a widescan. Results flow in via
+            -- [atlas-scan]: trigger a widescan. Results flow in via
             -- the 0x0F4 hook and ship out in the next regular packet.
             trigger_widescan()
             last_widescan_at = now
             log('widescan request sent')
         end
     elseif cmd == 'bit' or cmd == 'bitzer' then
-        -- AI EDIT [atlas-scan]: Sortie-only safety lock matches bitzer.lua.
+        -- [atlas-scan]: Sortie-only safety lock matches bitzer.lua.
         local info = windower.ffxi.get_info()
         if not info or not SORTIE_ZONES[info.zone] then
             log(('//atlas %s is only available in Sortie zones'):format(cmd))
@@ -617,7 +845,7 @@ windower.register_event('addon command', function(cmd, ...)
             smart_ping_bitzer(args[1])
         end
     elseif cmd == 'dumpzone' then
-        -- AI EDIT [atlas-dumpzone]: temporary debug. Dumps everything
+        -- [atlas-dumpzone]: temporary debug. Dumps everything
         -- Windower exposes about the current zone/sub-area, so we can
         -- see whether there's a sub-map / floor index we can ship to
         -- the renderer (Atlas currently picks sub-maps by position
@@ -651,7 +879,7 @@ windower.register_event('addon command', function(cmd, ...)
             end
         end
     elseif cmd == 'claim' then
-        -- AI EDIT [atlas-claim-debug]: target a normal mob you're
+        -- [atlas-claim-debug]: target a normal mob you're
         -- fighting, then //at claim. Prints player.id vs target.
         -- claim_id so we can confirm whether the "claimed by me"
         -- check fires (and, if not, what the actual claim_id looks
@@ -669,7 +897,7 @@ windower.register_event('addon command', function(cmd, ...)
         log(('eq low 16 bits = %s'):format(tostring(bit.band(cid, 0xFFFF) == bit.band(player.id, 0xFFFF))))
         log(('eq index       = %s'):format(tostring(cid == player.index)))
     elseif cmd == 'dumpmob' then
-        -- AI EDIT [atlas-dumpmob]: temporary debug. Target a trust /
+        -- [atlas-dumpmob]: temporary debug. Target a trust /
         -- pet / NPC, then //at dumpmob to print every non-table field
         -- of that mob entry. Used to find a distinguishing field that
         -- can route trusts away from the 'npc' classification in the
@@ -686,7 +914,7 @@ windower.register_event('addon command', function(cmd, ...)
             end
         end
     elseif cmd == 'test' then
-        -- AI EDIT [atlas-test]: dev/test helper, same pattern as
+        -- [atlas-test]: dev/test helper, same pattern as
         -- bitzer.lua's 'test' command. Reads the player's current
         -- target and stages it into the bitzer table as if it had
         -- come from a real 0x00D response. Lets you exercise the
@@ -706,7 +934,7 @@ windower.register_event('addon command', function(cmd, ...)
             log(('test: added %s (idx=%d) at (%.1f, %.1f)'):format(target.name, target.index, target.x, target.y))
         end
     elseif cmd == 'clear' then
-        -- AI EDIT [atlas-scan]: clear flags ride the next outgoing packet
+        -- [atlas-scan]: clear flags ride the next outgoing packet
         -- so the radar empties its tables in lock-step with the addon's
         -- own pending buffer.
         local what = args[1] and args[1]:lower() or 'all'
@@ -759,6 +987,24 @@ windower.register_event('addon command', function(cmd, ...)
         settings.enabled = not settings.enabled
         settings:save()
         log('enabled = ' .. tostring(settings.enabled))
+    elseif cmd == 'nm' then
+        -- [atlas-nm-discovery]: flag current target as an NM.
+        -- Appended to data/discovered_nms.json in the addon dir. Users
+        -- send that file back to the maintainer, who reviews and merges
+        -- entries into the bundled nm.json.
+        flag_target_nm('nm')
+    elseif cmd == 'notnm' then
+        -- [atlas-nm-discovery]: flag current target as NOT an
+        -- NM. Same workflow as //at nm but the maintainer will REMOVE
+        -- the entry from nm.json instead of adding.
+        flag_target_nm('notnm')
+    elseif cmd == 'nmlist' then
+        print_nm_lists()
+    elseif cmd == 'r' or cmd == 'remove' then
+        -- [atlas-nm-discovery]: scrub current target from BOTH
+        -- discovery lists. Use this when a mob was added by mistake
+        -- and shouldn't be in the maintainer's review queue at all.
+        remove_target_nm()
     else
         log('--- atlas commands ---')
         log('//atlas status        -- show config + send count')
@@ -770,6 +1016,10 @@ windower.register_event('addon command', function(cmd, ...)
         log('//atlas ws            -- trigger widescan')
         log('//atlas bit [e|f|g|h] -- trigger Bitzer ping (Sortie only)')
         log('//atlas clear [ws|bit] -- clear scan results (both if no arg)')
+        log('//atlas nm            -- flag current target AS an NM (for maintainer review)')
+        log('//atlas notnm         -- flag current target as NOT an NM (for maintainer review)')
+        log('//atlas r             -- remove current target from BOTH discovery lists')
+        log('//atlas nmlist        -- show discovered/non-NM counts + file paths')
         log('//atlas test         -- stage your target as a fake bitzer (dev/test)')
     end
 end)
