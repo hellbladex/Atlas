@@ -786,7 +786,40 @@ end
 --[[ -----------------------------------------------------------------
      Events
 ----------------------------------------------------------------- ]]
+-- [auto-detect-lan-ip]: ask the OS what local IP it would use to
+-- reach the public internet. The setpeername call on a UDP socket
+-- doesn't actually send any packets -- it just configures the
+-- socket's default destination, which makes getsockname() return
+-- the local IP the OS would pick for that route. That's the LAN
+-- interface IP, which works reliably even when 127.0.0.1 loopback
+-- is being intercepted (Hyper-V, WSL2, Docker Desktop, some AV).
+local function detect_local_ip()
+    local s = pcall(socket.udp) and socket.udp() or nil
+    if not s then return nil end
+    local set_ok = pcall(function() s:setpeername('8.8.8.8', 80) end)
+    if not set_ok then pcall(function() s:close() end) return nil end
+    local ip = nil
+    pcall(function() ip = s:getsockname() end)
+    pcall(function() s:close() end)
+    if not ip or ip == '0.0.0.0' or ip == '127.0.0.1' or ip == '::1' then return nil end
+    return ip
+end
+
 windower.register_event('load', function()
+    -- [auto-detect-lan-ip]: if the saved host is loopback, swap it
+    -- for the host machine's LAN IP at runtime. Loopback (127.0.0.1)
+    -- UDP can be silently intercepted by virtualization stacks and
+    -- some AV software; routing through the LAN adapter bypasses
+    -- those interceptors. Runtime-only -- the persisted setting is
+    -- left at whatever the user configured. //at host <ip> still
+    -- overrides if the user wants a specific destination.
+    if settings.host == '127.0.0.1' or settings.host == '::1' then
+        local detected = detect_local_ip()
+        if detected then
+            log(('auto-detected LAN IP %s (override with //at host <ip>)'):format(detected))
+            settings.host = detected
+        end
+    end
     open_socket()
     running = true
     coroutine.schedule(tick_loop, 1 / math.max(1, settings.rate_hz))
@@ -958,10 +991,28 @@ windower.register_event('addon command', function(cmd, ...)
             log('widescan + bitzer cleared')
         end
     elseif cmd == 'host' and args[1] then
-        settings.host = args[1]
-        settings:save()
+        -- [auto-detect-lan-ip]: 'auto' resets to loopback (which the
+        -- next load will swap for a fresh-detected LAN IP) and also
+        -- attempts detection right now so the change takes effect
+        -- without a reload. Useful after network changes (different
+        -- WiFi, DHCP renewal, etc.) without having to look up the
+        -- new IP manually.
+        if args[1]:lower() == 'auto' then
+            settings.host = '127.0.0.1'
+            settings:save()
+            local detected = detect_local_ip()
+            if detected then
+                settings.host = detected
+                log(('host = auto -> %s (saved as 127.0.0.1; re-detects every reload)'):format(detected))
+            else
+                log('host = auto, but LAN IP detection failed; falling back to 127.0.0.1')
+            end
+        else
+            settings.host = args[1]
+            settings:save()
+            log('host = ' .. settings.host)
+        end
         open_socket()
-        log('host = ' .. settings.host)
     elseif cmd == 'port' and args[1] then
         local n = tonumber(args[1])
         if n and n > 0 and n < 65536 then
