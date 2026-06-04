@@ -724,13 +724,18 @@ local function build_packet()
         -- Western Adoulin there can be 100+ PCs eating the 200-mob
         -- cap. Trusts/pets have spawn_type ~12-14 which sets the
         -- GroupMember bit, so they're preserved.
+        -- [furniture-filter]: also drop mog-house furniture
+        -- (spawn_type == 34, the NPC bit + Object bit combination).
+        -- The renderer skips kind='furniture' at draw time anyway,
+        -- so these were just wasting packet slots.
         local st = m and m.spawn_type or 0
         local lone_pc = (st % 2 >= 1)   -- 0x01 bit set
             and (st % 8 < 4)            -- 0x04 bit NOT set
             and (st % 16 < 8)           -- 0x08 bit NOT set
         if m and m.id and m.id ~= player.id and m.x and m.y
-                and m.name and m.name ~= ''
+                and m.name and m.name ~= '' and m.name ~= 'Furniture'
                 and not lone_pc
+                and st ~= 34
                 and not (m.x == 0 and m.y == 0 and (m.z or 0) == 0) then
             local include = true
             if cull then
