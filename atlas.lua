@@ -145,7 +145,7 @@ end
 local defaults = {
     host = '127.0.0.1',
     port = 32123,
-    rate_hz = 30,
+    rate_hz = 10,
     enabled = true,
     -- Only mobs within this many yalms of the player are included in
     -- the packet. Set to 0 for unlimited (no cull). Default matches
@@ -713,7 +713,24 @@ local function build_packet()
         -- can reveal them on demand. Addon still drops truly bogus
         -- entries at (0,0,0) -- those are uninitialized array slots,
         -- never real entities the renderer would want to see.
+        -- [unnamed-filter]: also drop entries with no name. In dense
+        -- zones FFXi's mob array carries many nameless skeleton/
+        -- placeholder entries that eat the 200-mob cap budget but
+        -- never render anything useful on the radar.
+        -- [pc-filter]: drop other players (spawn_type 0x01 = PC) unless
+        -- they're in your party (0x04 GroupMember) or alliance
+        -- (0x08 AllianceMember). The radar's purpose is mob/NPC
+        -- tracking, not player-spotting -- and in busy hubs like
+        -- Western Adoulin there can be 100+ PCs eating the 200-mob
+        -- cap. Trusts/pets have spawn_type ~12-14 which sets the
+        -- GroupMember bit, so they're preserved.
+        local st = m and m.spawn_type or 0
+        local lone_pc = (st % 2 >= 1)   -- 0x01 bit set
+            and (st % 8 < 4)            -- 0x04 bit NOT set
+            and (st % 16 < 8)           -- 0x08 bit NOT set
         if m and m.id and m.id ~= player.id and m.x and m.y
+                and m.name and m.name ~= ''
+                and not lone_pc
                 and not (m.x == 0 and m.y == 0 and (m.z or 0) == 0) then
             local include = true
             if cull then
