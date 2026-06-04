@@ -145,7 +145,7 @@ end
 local defaults = {
     host = '127.0.0.1',
     port = 32123,
-    rate_hz = 10,
+    rate_hz = 30,
     enabled = true,
     -- Only mobs within this many yalms of the player are included in
     -- the packet. Set to 0 for unlimited (no cull). Default matches
