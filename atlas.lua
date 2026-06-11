@@ -585,6 +585,175 @@ local function remove_target_nm()
     end
 end
 
+--[[ -----------------------------------------------------------------
+     Missing fixtures + POI plumbing.
+
+     Two add-fixture commands; both are pure UDP-send -- the radar
+     app owns ALL fixture persistence. No JSON state lives in the
+     addon dir.
+
+       //atlas missing       -- with a target locked, send the
+                                targeted entity's name + xyz + zone
+                                to the radar. Radar classifies the
+                                name, dedups against existing entries,
+                                and writes it directly to
+                                static_fixtures.json next to the .exe.
+
+       //atlas poi <text>    -- adds a point-of-interest at the
+                                player's current position with the
+                                given label. Sends a UDP packet to
+                                the radar app, which persists it into
+                                custom_fixtures.json next to the .exe
+                                and renders it as a gold star.
+----------------------------------------------------------------- ]]
+
+-- [atlas-missing-fixture-recognizer]: mirror of the patterns declared
+-- in electron/src/main.js's FIXTURE_REGISTRY (the JS-side single
+-- source of truth for fixture types). We pre-check on the addon side
+-- so targeting an unrelated mob/NPC and running //at missing gives a
+-- clear "not a recognized fixture type" message instead of a
+-- misleading "sent ..." log followed by a silent drop at the radar.
+-- Lua can't import the JS data, so this table is hand-maintained;
+-- when you add a new fixture type to FIXTURE_REGISTRY add a matching
+-- exact-match or numbered-pattern entry here so the recognizer keeps
+-- up.
+local function is_recognized_fixture_name(name)
+    if not name or name == '' then return false end
+    local n = name:lower()
+    -- Exact-match fixture names.
+    local exact = {
+        ['survival guide']        = true,
+        ['field manual']          = true,
+        ['waypoint']              = true,
+        ['telepoint']             = true,
+        ['cavernous maw']         = true,
+        ['ethereal junction']     = true,
+        ['planar rift']           = true,
+        ['mining point']          = true,
+        ['logging point']         = true,
+        ['harvesting point']      = true,
+        ['excavation point']      = true,
+        ['undulating confluence'] = true,
+        ['synergy furnace']       = true,
+        ['grounds tome']          = true,
+        -- 17 candidate types added in the registry expansion. Each
+        -- ships in main.js's FIXTURE_REGISTRY too; the renderer-side
+        -- draws the no-symbol placeholder until art arrives.
+        ['spatial displacement']  = true,
+        ['unstable displacement'] = true,
+        ['dimensional portal']    = true,
+        ['swirling vortex']       = true,
+        ['shattered telepoint']   = true,
+        ['geomagnetic fount']     = true,
+        ['grimslight']            = true,
+        ['treasure coffer']       = true,
+        ['treasure chest']        = true,
+        ['quasilumin']            = true,
+        ['monolith']              = true,
+        ['cermet headstone']      = true,
+        ['geomantic reservoir']   = true,
+        ['ergon locus']           = true,
+        ['scalable area']         = true,
+        ['castoff point']         = true,
+        ['goblin footprint']      = true,
+        ['lost article']          = true,
+        ['diaphanous gadget']     = true,
+        ['diaphanous device']     = true,
+        ['diaphanous bitzer']     = true,
+        ['matter diffusion module']= true,
+        ['temenos coffer']        = true,
+        ['apollyon coffer']       = true,
+        ['veil']                  = true,
+    }
+    if exact[n] then return true end
+    -- Numbered / suffixed patterns. Lua patterns instead of regex.
+    if n:match('^home point #?%d+$') then return true end
+    if n:match('^conflux #?%d+$') then return true end
+    if n:match('^walking conflux #?%d+$') then return true end
+    -- Limbus coffers come numbered in-game ("Temenos Coffer #1" etc.).
+    if n:match('^temenos coffer #?%d+$') then return true end
+    if n:match('^apollyon coffer #?%d+$') then return true end
+    if n:match('^eschan portal #?%d+$') then return true end
+    if n:match('^veridical conflux #?%d+$') then return true end
+    if n:match('^ethereal ingress #?%d+$') then return true end
+    -- Sortie Diaphanous fixtures use letter suffixes ("#A", "#B"
+    -- etc.), so the pattern allows either letter or digit. Lua
+    -- patterns are case-sensitive but we lowercased `n` at the top
+    -- of this function, so `[a-z%d]+` covers both.
+    if n:match('^diaphanous gadget #[a-z%d]+$') then return true end
+    if n:match('^diaphanous device #[a-z%d]+$') then return true end
+    if n:match('^diaphanous bitzer #[a-z%d]+$') then return true end
+    return false
+end
+
+local function flag_missing_fixture()
+    local target = windower.ffxi.get_mob_by_target('t')
+    if not target then
+        log('no target -- target an entity first, then //at missing')
+        return
+    end
+    if not (socket_ok and udp) then
+        log('UDP socket not ready -- missing fixture not sent')
+        return
+    end
+    local info = windower.ffxi.get_info()
+    if not info then log('no zone info available') return end
+    local name = target.name
+    if not name or name == '' then log('target has no name') return end
+    if not is_recognized_fixture_name(name) then
+        log(('"%s" is not a recognized fixture type -- not sent'):format(name))
+        return
+    end
+    local pkt = {
+        v         = 1,
+        kind      = 'add_missing',
+        char_name = (windower.ffxi.get_mob_by_target('me') or {}).name,
+        zone_id   = info.zone,
+        name      = name,
+        x         = target.x,
+        y         = target.y,
+        z         = target.z,
+        id        = target.id or 0,
+    }
+    local ok, err = pcall(udp.sendto, udp, json_encode(pkt), settings.host, settings.port)
+    if ok then
+        log(('sent missing fixture "%s" (zone %d) to radar'):format(name, info.zone))
+    else
+        log('missing fixture send error: ' .. tostring(err))
+    end
+end
+
+local function send_add_poi(label)
+    if not (socket_ok and udp) then
+        log('UDP socket not ready -- POI not sent')
+        return
+    end
+    local info   = windower.ffxi.get_info()
+    local player = windower.ffxi.get_mob_by_target('me')
+    if not info or not player then
+        log('no zone/player info -- POI not sent')
+        return
+    end
+    if not label or label == '' then label = 'POI' end
+    local pkt = {
+        v         = 1,
+        kind      = 'add_poi',
+        char_name = player.name,
+        zone_id   = info.zone,
+        x         = player.x,
+        y         = player.y,
+        z         = player.z,
+        label     = label,
+    }
+    local ok, err = pcall(udp.sendto, udp, json_encode(pkt), settings.host, settings.port)
+    if ok then
+        log(('sent POI "%s" at (%.1f, %.1f, %.1f) zone %d'):format(
+            label, player.x or 0, player.y or 0, player.z or 0, info.zone))
+    else
+        log('POI send error: ' .. tostring(err))
+    end
+end
+
 local function print_nm_lists()
     local function summarize(label, data)
         local zone_count = 0
@@ -724,18 +893,25 @@ local function build_packet()
         -- Western Adoulin there can be 100+ PCs eating the 200-mob
         -- cap. Trusts/pets have spawn_type ~12-14 which sets the
         -- GroupMember bit, so they're preserved.
-        -- [furniture-filter]: also drop mog-house furniture
-        -- (spawn_type == 34, the NPC bit + Object bit combination).
-        -- The renderer skips kind='furniture' at draw time anyway,
-        -- so these were just wasting packet slots.
+        -- [furniture-filter]: drop spawn_type 34 (NPC + Object bit
+        -- combo) ONLY when the player is inside a mog house. Mog
+        -- house furniture spam was the original reason for this
+        -- filter (it eats the 200-mob cap budget for no useful
+        -- render), but several legitimate fixtures share spawn_type
+        -- 34 outside mog houses -- notably the Limbus Swirling
+        -- Vortexes, which never made it into pkt.mobs[] under the
+        -- old unconditional filter. Scoping to mog house only keeps
+        -- the budget protection where it matters and lets every
+        -- other zone's spawn_type-34 entries through.
         local st = m and m.spawn_type or 0
         local lone_pc = (st % 2 >= 1)   -- 0x01 bit set
             and (st % 8 < 4)            -- 0x04 bit NOT set
             and (st % 16 < 8)           -- 0x08 bit NOT set
+        local is_mh_furniture = pkt.mog_house and st == 34
         if m and m.id and m.id ~= player.id and m.x and m.y
                 and m.name and m.name ~= '' and m.name ~= 'Furniture'
                 and not lone_pc
-                and st ~= 34
+                and not is_mh_furniture
                 and not (m.x == 0 and m.y == 0 and (m.z or 0) == 0) then
             local include = true
             if cull then
@@ -1073,6 +1249,18 @@ windower.register_event('addon command', function(cmd, ...)
         flag_target_nm('notnm')
     elseif cmd == 'nmlist' then
         print_nm_lists()
+    elseif cmd == 'missing' then
+        -- [atlas-missing-fixtures]: target an entity, run this to log
+        -- it into data/missing_fixtures.json for the maintainer to
+        -- fold into static_fixtures.json on the next compile.
+        flag_missing_fixture()
+    elseif cmd == 'poi' then
+        -- [atlas-poi]: drop a custom point-of-interest at your
+        -- current position with the supplied label. Sent to the radar
+        -- via UDP; radar persists it in custom_fixtures.json and
+        -- renders it as a gold star.
+        local label = table.concat(args, ' ')
+        send_add_poi(label)
     elseif cmd == 'r' or cmd == 'remove' then
         -- [atlas-nm-discovery]: scrub current target from BOTH
         -- discovery lists. Use this when a mob was added by mistake
@@ -1093,6 +1281,8 @@ windower.register_event('addon command', function(cmd, ...)
         log('//atlas notnm         -- flag current target as NOT an NM (for maintainer review)')
         log('//atlas r             -- remove current target from BOTH discovery lists')
         log('//atlas nmlist        -- show discovered/non-NM counts + file paths')
+        log('//atlas missing       -- log current target into missing_fixtures.json (dev)')
+        log('//atlas poi <text>    -- drop a POI at your current position with a label')
         log('//atlas test         -- stage your target as a fake bitzer (dev/test)')
     end
 end)
