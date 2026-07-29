@@ -154,6 +154,18 @@ local defaults = {
 }
 local settings = config.load(defaults)
 
+-- [atlas-party-dots]: hard distance ceiling for party-member dots,
+-- separate from settings.max_distance because it encodes a fact about
+-- the data rather than a display preference. Measured in-game with
+-- //atlas dumpparty: past roughly this distance the client stops
+-- receiving position updates for a party member, yet KEEPS the entity
+-- in the mob array carrying its last-known coords. Forwarding those
+-- would put a dot on the radar that looks live and isn't -- strictly
+-- worse than no dot at all. Applies even when the general cull is
+-- disabled via `//at cull 0`.
+local PARTY_MAX_DISTANCE = 50
+local PARTY_MAX_DIST_SQ  = PARTY_MAX_DISTANCE * PARTY_MAX_DISTANCE
+
 local udp = nil
 local pkts_sent = 0
 local last_status_log = 0
@@ -805,12 +817,48 @@ local function build_packet()
     -- other player" with different marker colors. Computed each tick
     -- because party membership can change at any time (invites, KOs,
     -- members leaving zones, etc.).
+    -- [atlas-party-dots]: three products from one get_party() walk.
+    --   party_ids   -- ids the renderer may draw as party dots (also
+    --                  still drives claim coloring)
+    --   party_id_set -- same set as a lookup, for the distance ceiling
+    --                  applied in the mob loop below
+    --   party       -- {id, name} for every OCCUPIED slot, including
+    --                  members with no live mob entry and members in
+    --                  another zone. The radar's per-member checklist
+    --                  wants the full roster so you can pre-mute
+    --                  someone who currently has no dot; `name` is the
+    --                  stable key it persists against (ids churn on
+    --                  every zone change).
+    -- Self is in p0..p5 but excluded from `party` -- you're the arrow,
+    -- not a dot, so a checkbox for yourself would be meaningless.
+    --
+    -- Same-zone gate on the first two: a member who has zoned out can
+    -- leave a stale entity behind in the client's mob array, frozen at
+    -- wherever they stood when they took the zoneline. get_party()
+    -- keeps reporting their true zone, so compare it against ours and
+    -- keep them out of party_ids entirely. The renderer then classifies
+    -- that leftover as a plain 'player' and skips it, so no dot -- same
+    -- outcome as any other PC.
     local party = windower.ffxi.get_party() or {}
     local party_ids = {}
+    local party_id_set = {}
+    local party_members = {}
     for _, slot in ipairs({'p0','p1','p2','p3','p4','p5'}) do
         local pm = party[slot]
-        if pm and pm.mob and pm.mob.id then
+        -- Fails OPEN on a nil zone: if Windower ever stops populating
+        -- the field, the worst case is the stale-zoneline dot coming
+        -- back, versus every party dot silently disappearing. //atlas
+        -- dumpparty prints this field so it's one command to verify.
+        local same_zone = pm and (pm.zone == nil or pm.zone == info.zone)
+        if pm and same_zone and pm.mob and pm.mob.id then
             party_ids[#party_ids + 1] = pm.mob.id
+            party_id_set[pm.mob.id] = true
+        end
+        if pm and pm.name and pm.name ~= '' and pm.name ~= player.name then
+            party_members[#party_members + 1] = {
+                id   = (pm.mob and pm.mob.id) or 0,
+                name = pm.name,
+            }
         end
     end
 
@@ -819,6 +867,7 @@ local function build_packet()
         char_name = player.name,
         char_id   = player.id,
         party_ids = party_ids,
+        party     = party_members,
         zone_id   = info.zone,
         mog_house = info.mog_house and true or false,
         ts        = os.clock(),
@@ -917,6 +966,20 @@ local function build_packet()
             if cull then
                 local dx, dy = m.x - self_mob.x, m.y - self_mob.y
                 if dx * dx + dy * dy > max_d_sq then include = false end
+            end
+            -- [atlas-party-dots]: party members get a distance ceiling
+            -- of their own, enforced even when the general cull is off
+            -- (`//at cull 0`). Confirmed in-game via //at dumpparty:
+            -- past ~50y the client stops receiving position updates
+            -- for a party member but KEEPS the entity in the mob array
+            -- carrying its last-known coords. A dot drawn from those
+            -- is indistinguishable from a live one while being wrong,
+            -- which is strictly worse than drawing nothing. So this is
+            -- a data-validity boundary, not a display preference --
+            -- that's why it doesn't ride on settings.max_distance.
+            if include and party_id_set[m.id] then
+                local dx, dy = m.x - self_mob.x, m.y - self_mob.y
+                if dx * dx + dy * dy > PARTY_MAX_DIST_SQ then include = false end
             end
             if include then
                 pkt.mobs[#pkt.mobs + 1] = {
@@ -1109,6 +1172,71 @@ windower.register_event('addon command', function(cmd, ...)
                 end
             end
         end
+    elseif cmd == 'dumpparty' then
+        -- [atlas-party-dots]: diagnostic for the party-dot feature.
+        -- Prints every slot plus the reason its dot is suppressed, if
+        -- it is. Use it when a member you expect to see isn't showing.
+        --
+        -- Background, measured in-game rather than assumed:
+        -- get_party() returns name / hp / zone for every occupied slot
+        -- at any distance, but x/y/z live on the `mob` sub-table. Past
+        -- ~50y the client stops receiving position updates for a
+        -- member yet KEEPS that entity in the mob array holding its
+        -- last-known coords. So the failure mode is NOT missing data,
+        -- it's silently stale data -- a dot that looks live and isn't.
+        -- Same trap when a member zones out and their entity lingers
+        -- frozen at the zoneline.
+        --
+        -- Hence the two gates the radar enforces, both reported below:
+        -- drop past PARTY_MAX_DISTANCE, and drop when pm.zone doesn't
+        -- match ours. There is no honest way to show a distant member,
+        -- because obtaining a fresh position would mean injecting a
+        -- request to the server -- see the read-only note in
+        -- build_packet.
+        local party = windower.ffxi.get_party() or {}
+        local me = windower.ffxi.get_mob_by_target('me')
+        local info = windower.ffxi.get_info()
+        log(('=== get_party() -- my zone = %s, cull = %dy ==='):format(
+            info and tostring(info.zone) or '?', settings.max_distance))
+        for _, slot in ipairs({'p0','p1','p2','p3','p4','p5'}) do
+            local pm = party[slot]
+            if not pm then
+                log(('  %s (empty)'):format(slot))
+            else
+                local mob = pm.mob
+                local line = ('  %s %-16s zone=%-5s hpp=%-4s mob=%s'):format(
+                    slot,
+                    tostring(pm.name or '?'),
+                    tostring(pm.zone or '?'),
+                    tostring(pm.hpp or '?'),
+                    mob and 'YES' or 'nil')
+                if mob then
+                    local dist_sq, dist = nil, '?'
+                    if me and me.x and mob.x then
+                        local dx, dy = mob.x - me.x, mob.y - me.y
+                        dist_sq = dx * dx + dy * dy
+                        dist = ('%.1f'):format(math.sqrt(dist_sq))
+                    end
+                    line = line .. ('  xyz=(%.1f, %.1f, %.1f) dist=%sy st=%s valid=%s'):format(
+                        mob.x or 0, mob.y or 0, mob.z or 0, dist,
+                        tostring(mob.spawn_type), tostring(mob.valid_target))
+                    -- [atlas-party-dots]: spell out which gate (if
+                    -- any) is suppressing this member's dot, so the
+                    -- command answers "why don't I see them" directly
+                    -- instead of leaving you to compare numbers.
+                    local reason = nil
+                    if not (pm.zone == nil or pm.zone == (info and info.zone)) then
+                        reason = 'DROPPED (different zone)'
+                    elseif dist_sq and dist_sq > PARTY_MAX_DIST_SQ then
+                        reason = ('DROPPED (past %dy -- coords are stale)'):format(PARTY_MAX_DISTANCE)
+                    end
+                    if reason then line = line .. '  <- ' .. reason end
+                else
+                    line = line .. '  <- DROPPED (no entity in mob array)'
+                end
+                log(line)
+            end
+        end
     elseif cmd == 'claim' then
         -- [atlas-claim-debug]: target a normal mob you're
         -- fighting, then //at claim. Prints player.id vs target.
@@ -1284,5 +1412,6 @@ windower.register_event('addon command', function(cmd, ...)
         log('//atlas missing       -- log current target into missing_fixtures.json (dev)')
         log('//atlas poi <text>    -- drop a POI at your current position with a label')
         log('//atlas test         -- stage your target as a fake bitzer (dev/test)')
+        log('//atlas dumpparty     -- dump party slots + whether each has live coords (dev)')
     end
 end)
