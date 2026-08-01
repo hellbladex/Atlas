@@ -967,19 +967,32 @@ local function build_packet()
                 local dx, dy = m.x - self_mob.x, m.y - self_mob.y
                 if dx * dx + dy * dy > max_d_sq then include = false end
             end
-            -- [atlas-party-dots]: party members get a distance ceiling
-            -- of their own, enforced even when the general cull is off
-            -- (`//at cull 0`). Confirmed in-game via //at dumpparty:
-            -- past ~50y the client stops receiving position updates
-            -- for a party member but KEEPS the entity in the mob array
-            -- carrying its last-known coords. A dot drawn from those
-            -- is indistinguishable from a live one while being wrong,
-            -- which is strictly worse than drawing nothing. So this is
-            -- a data-validity boundary, not a display preference --
-            -- that's why it doesn't ride on settings.max_distance.
+            -- [atlas-party-dots]: staleness gate. Out of range, the
+            -- client stops updating a party member's position but KEEPS
+            -- the entity in the mob array holding its last-known coords.
+            -- A dot drawn from those looks live and is wrong.
+            --
+            -- valid_target is the signal that actually detects this --
+            -- confirmed in-game, it flips false the moment a member
+            -- leaves range and back to true on return. A distance test
+            -- CANNOT do this job: the coords freeze at the last update
+            -- received, which is necessarily inside the boundary
+            -- (~40-45y), so a 50y threshold measured against them never
+            -- trips and the dot parks at the stale spot forever.
+            --
+            -- The distance ceiling is kept as a cheap backstop for the
+            -- case where a member is genuinely far yet still flagged
+            -- valid, and because it holds even when the general cull is
+            -- off (`//at cull 0`). Both are data-validity boundaries,
+            -- not display preferences -- hence not riding on
+            -- settings.max_distance.
             if include and party_id_set[m.id] then
-                local dx, dy = m.x - self_mob.x, m.y - self_mob.y
-                if dx * dx + dy * dy > PARTY_MAX_DIST_SQ then include = false end
+                if not m.valid_target then
+                    include = false
+                else
+                    local dx, dy = m.x - self_mob.x, m.y - self_mob.y
+                    if dx * dx + dy * dy > PARTY_MAX_DIST_SQ then include = false end
+                end
             end
             if include then
                 pkt.mobs[#pkt.mobs + 1] = {
@@ -1224,11 +1237,14 @@ windower.register_event('addon command', function(cmd, ...)
                     -- any) is suppressing this member's dot, so the
                     -- command answers "why don't I see them" directly
                     -- instead of leaving you to compare numbers.
+                    -- Order matches the gates in build_packet.
                     local reason = nil
                     if not (pm.zone == nil or pm.zone == (info and info.zone)) then
                         reason = 'DROPPED (different zone)'
+                    elseif not mob.valid_target then
+                        reason = 'DROPPED (valid_target=false -- out of range, coords are stale)'
                     elseif dist_sq and dist_sq > PARTY_MAX_DIST_SQ then
-                        reason = ('DROPPED (past %dy -- coords are stale)'):format(PARTY_MAX_DISTANCE)
+                        reason = ('DROPPED (past %dy backstop)'):format(PARTY_MAX_DISTANCE)
                     end
                     if reason then line = line .. '  <- ' .. reason end
                 else
